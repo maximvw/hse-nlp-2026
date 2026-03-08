@@ -117,7 +117,7 @@ _run_qa(diarized_segments, args)
   |     1. Группирует DiarizedSegment'ы в чанки по ~1000 символов.
   |        Каждый чанк = Document с метаданными (start, end, speakers).
   |     2. Генерирует эмбеддинги через sentence-transformers
-  |        (intfloat/multilingual-e5-base, inference на MPS).
+  |        (sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2, inference на MPS).
   |     3. Строит FAISS in-memory индекс.
   |
   |-- Interactive loop:
@@ -168,7 +168,7 @@ DiarizedSegment        # (speaker, start, end, text) — после alignment с
 - `-o / --output-dir` — директория вывода (default: `output`)
 - `--whisper-model` — имя модели whisper.cpp (default: `large-v3-turbo-q5_0`)
 - `--llm-model` — модель LLM через OpenRouter (default: `nvidia/nemotron-nano-9b-v2:free`)
-- `--embedding-model` — модель эмбеддингов для RAG (default: `intfloat/multilingual-e5-base`)
+- `--embedding-model` — модель эмбеддингов для RAG (default: `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`)
 - `--language` — язык ASR (default: `ru`)
 - `--threads` — потоки для whisper.cpp (default: `8`)
 - `--no-diarize` — пропустить диаризацию (только для summary mode; qa mode требует диаризацию)

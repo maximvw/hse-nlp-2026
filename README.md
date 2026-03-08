@@ -90,7 +90,7 @@ uv run python main.py "https://www.youtube.com/watch?v=VIDEO_ID" summary
 uv run python main.py "https://www.youtube.com/watch?v=VIDEO_ID" summary --no-diarize
 
 # Интерактивные вопросы по видео (Q&A, требует диаризацию)
-uv run python main.py "https://www.youtube.com/watch?v=Pgu2xWfWBoo" qa
+uv run python main.py "https://www.youtube.com/watch?v=Pgu2xWfWBoo" qa -o output
 
 # С кастомными параметрами
 uv run python main.py \
@@ -111,7 +111,7 @@ uv run python main.py \
 | `-o`, `--output-dir` | `output` | Директория для результатов |
 | `--whisper-model` | `large-v3-turbo-q5_0` | Модель whisper.cpp (квантизованная) |
 | `--llm-model` | `nvidia/nemotron-nano-9b-v2:free` | Модель LLM через OpenRouter |
-| `--embedding-model` | `intfloat/multilingual-e5-base` | Модель эмбеддингов для RAG |
+| `--embedding-model` | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | Модель эмбеддингов для RAG |
 | `--language` | `ru` | Язык для ASR |
 | `--threads` | `8` | Количество потоков для whisper.cpp |
 | `--no-diarize` | `false` | Пропустить диаризацию (только summary mode) |
