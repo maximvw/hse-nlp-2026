@@ -17,6 +17,7 @@ def download_audio(url: str, output_dir: Path) -> Path:
             "yt-dlp",
             "-x",
             "--audio-format", "wav",
+            "--force-overwrites",
             "-o", output_template,
             "--no-playlist",
             url,
