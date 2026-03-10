@@ -15,33 +15,40 @@ from pipeline.vad import SpeechSegment
 console = Console()
 
 SAMPLE_RATE = 16000
-N_MELS = 80
+SPEAKER_MODEL = "microsoft/wavlm-base-sv"
 
 
-def _extract_embedding(chunk: torch.Tensor, mel_transform: torch.nn.Module) -> np.ndarray | None:
-    """Compute a speaker embedding from an audio chunk using mel-spectrogram statistics.
+def _load_speaker_model():
+    """Load WavLM speaker verification model from HuggingFace."""
+    from transformers import AutoFeatureExtractor, WavLMForXVector
 
-    Returns a fixed-size feature vector: concat(mean, std) of mel bands across time.
-    """
-    if chunk.shape[-1] < int(SAMPLE_RATE * 0.2):
+    console.print(f"  Loading speaker model [dim]{SPEAKER_MODEL}[/dim]...")
+    feature_extractor = AutoFeatureExtractor.from_pretrained(SPEAKER_MODEL)
+    model = WavLMForXVector.from_pretrained(SPEAKER_MODEL)
+    model.eval()
+    return feature_extractor, model
+
+
+def _embed_segment(
+    audio_np: np.ndarray,
+    feature_extractor,
+    model: torch.nn.Module,
+) -> np.ndarray | None:
+    """Compute L2-normalized speaker embedding for one audio chunk (numpy, 16kHz)."""
+    if len(audio_np) < int(SAMPLE_RATE * 0.2):
         return None
 
+    inputs = feature_extractor(
+        audio_np,
+        sampling_rate=SAMPLE_RATE,
+        return_tensors="pt",
+        padding=True,
+    )
     with torch.no_grad():
-        mel = mel_transform(chunk)  # (1, n_mels, time)
-        mel_db = torchaudio.functional.amplitude_to_DB(
-            mel, multiplier=10.0, amin=1e-10, db_multiplier=0.0, top_db=80.0,
-        )
-        mel_db = mel_db.squeeze(0)  # (n_mels, time)
+        embedding = model(**inputs).embeddings  # (1, hidden_size)
 
-        mean = mel_db.mean(dim=1)
-        std = mel_db.std(dim=1)
-        # Delta (first derivative) statistics for better speaker discrimination
-        delta = mel_db[:, 1:] - mel_db[:, :-1]
-        delta_mean = delta.mean(dim=1)
-        delta_std = delta.std(dim=1)
-
-        embedding = torch.cat([mean, std, delta_mean, delta_std])
-        return embedding.numpy()
+    embedding = torch.nn.functional.normalize(embedding, dim=-1)
+    return embedding.squeeze(0).numpy()
 
 
 @dataclass
@@ -56,19 +63,20 @@ def diarize(
     audio_path: Path,
     vad_segments: list[SpeechSegment],
     num_speakers: int | None = None,
-    threshold: float = 4.0,
+    threshold: float = 0.4,
 ) -> list[tuple[float, float, str]]:
-    """Speaker diarization via mel-spectrogram embeddings + agglomerative clustering.
+    """Speaker diarization via WavLM-SV embeddings + agglomerative clustering.
 
     Uses VAD segments already computed by Silero to avoid redundant segmentation.
-    For each segment, computes mel-spectrogram statistics as a speaker embedding,
-    then clusters embeddings to identify speakers.
+    Each VAD segment is embedded with microsoft/wavlm-base-sv (x-vector head),
+    then segments are clustered by cosine distance.
 
     Args:
         audio_path: Path to 16kHz mono WAV.
         vad_segments: Speech segments from Silero VAD.
         num_speakers: If known, fix the number of speakers. Otherwise auto-detect.
-        threshold: Distance threshold for clustering when num_speakers is None.
+        threshold: Cosine distance threshold for clustering when num_speakers is None.
+                   Lower = more speakers detected. Typical range: 0.3–0.6.
 
     Returns:
         List of (start_sec, end_sec, speaker_label).
@@ -76,31 +84,26 @@ def diarize(
     if not vad_segments:
         return []
 
-    console.print("[bold]Running speaker diarization (mel-spectrogram + clustering)...[/bold]")
+    console.print("[bold]Running speaker diarization (WavLM-SV + clustering)...[/bold]")
 
-    mel_transform = torchaudio.transforms.MelSpectrogram(
-        sample_rate=SAMPLE_RATE,
-        n_fft=512,
-        hop_length=160,
-        n_mels=N_MELS,
-    )
+    feature_extractor, model = _load_speaker_model()
 
-    # Load full audio once
+    # Load full audio once, convert to numpy for feature extractor
     waveform, sr = torchaudio.load(str(audio_path))
     if sr != SAMPLE_RATE:
         waveform = torchaudio.functional.resample(waveform, sr, SAMPLE_RATE)
     if waveform.shape[0] > 1:
         waveform = waveform.mean(dim=0, keepdim=True)
+    audio_np = waveform.squeeze(0).numpy()  # (samples,)
 
-    # Extract embedding for each VAD segment
+    # Extract embedding per VAD segment
     embeddings: list[np.ndarray | None] = []
     for seg in vad_segments:
         start_sample = int(seg.start * SAMPLE_RATE)
         end_sample = int(seg.end * SAMPLE_RATE)
-        chunk = waveform[:, start_sample:end_sample]
-        embeddings.append(_extract_embedding(chunk, mel_transform))
+        chunk = audio_np[start_sample:end_sample]
+        embeddings.append(_embed_segment(chunk, feature_extractor, model))
 
-    # Filter out None embeddings (too-short segments)
     valid_indices = [i for i, e in enumerate(embeddings) if e is not None]
     valid_embeddings = np.array([embeddings[i] for i in valid_indices])
 
@@ -111,17 +114,16 @@ def diarize(
     if len(valid_embeddings) == 1:
         labels = np.array([0])
     else:
-        clustering_kwargs: dict = {"metric": "euclidean", "linkage": "ward"}
+        clustering_kwargs: dict = {"metric": "cosine", "linkage": "average"}
         if num_speakers is not None:
             clustering_kwargs["n_clusters"] = num_speakers
         else:
             clustering_kwargs["n_clusters"] = None
             clustering_kwargs["distance_threshold"] = threshold
 
-        clustering = AgglomerativeClustering(**clustering_kwargs)
-        labels = clustering.fit_predict(valid_embeddings)
+        labels = AgglomerativeClustering(**clustering_kwargs).fit_predict(valid_embeddings)
 
-    # Build speaker turns
+    # Build speaker turns, assign "nearest" label to skipped (too-short) segments
     turns: list[tuple[float, float, str]] = []
     label_iter = iter(zip(valid_indices, labels))
     next_valid_idx, next_label = next(label_iter, (None, None))
@@ -132,7 +134,6 @@ def diarize(
             next_valid_idx, next_label = next(label_iter, (None, None))
         else:
             speaker = turns[-1][2] if turns else "SPEAKER_00"
-
         turns.append((seg.start, seg.end, speaker))
 
     n_speakers = len(set(labels))
