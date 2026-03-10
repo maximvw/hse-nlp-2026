@@ -9,7 +9,7 @@ dependencies = [
     "torch==2.10.0",
     "torchaudio==2.10.0",
     "pywhispercpp==1.4.1",
-    "pyannote-audio==4.0.4",
+    "scikit-learn>=1.4.0",
     "langchain-openai==1.1.10",
     "langchain-community==0.4.1",
     "faiss-cpu==1.13.2",
@@ -17,4 +17,5 @@ dependencies = [
     "python-dotenv==1.2.2",
     "rich==14.3.3",
     "tomli-w==1.2.0",
+    "torchcodec>=0.10.0",
 ]

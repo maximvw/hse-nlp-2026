@@ -1,3 +1,4 @@
+import time
 import argparse
 from pathlib import Path
 
@@ -55,7 +56,7 @@ def _process_video(args) -> tuple[str, list[DiarizedSegment] | None]:
             f"[{_fmt_time(seg.start)}] {seg.text}" for seg in transcript_segments
         )
     else:
-        speaker_turns = diarize(audio_path)
+        speaker_turns = diarize(audio_path, vad_segments)
         diarized_segments = align_transcript_with_speakers(
             transcript_segments, speaker_turns
         )
@@ -163,7 +164,13 @@ def main():
         )
         raise SystemExit(1)
 
+    start = time.perf_counter()
+
     transcript_text, diarized_segments = _process_video(args)
+
+    end = time.perf_counter()
+    
+    print(f"process video time: {(end - start)/60:.2f} minutes")
 
     if args.mode == "summary":
         _run_summary(transcript_text, args)

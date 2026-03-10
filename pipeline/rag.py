@@ -70,7 +70,8 @@ def build_index(
 
     embeddings = HuggingFaceEmbeddings(
         model_name=embedding_model,
-        model_kwargs={"device": "mps"},
+        # model_kwargs={"device": "mps"},
+        model_kwargs={"device": "cpu"},
     )
 
     index = FAISS.from_documents(chunks, embeddings)
