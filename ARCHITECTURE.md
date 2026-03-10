@@ -32,7 +32,7 @@ nlp-hw/
     vad.py                   # run_vad(), group_segments()
     transcribe.py            # transcribe()
     diarize.py               # diarize(), align_transcript_with_speakers(), format_transcript()
-    summarize.py             # summarize() — иерархическая суммаризация через LLM
+    summarize.py             # summarize() — три стратегии: single pass / rolling merge / hierarchical
     index.py                 # TranscriptIndex, build_index() — структурированный доступ + FAISS
     chatbot.py               # VideoState, build_chatbot_tools(), run_chatbot()
   output/                    # Генерируемые файлы (gitignored)
@@ -150,7 +150,10 @@ TranscriptIndex      (segments: list[DiarizedSegment], faiss: FAISS)
 
 4. **WavLM-SV вместо pyannote**: Не требует HF-токен и принятия лицензий. VAD-сегменты используются повторно — embeddings считаются только для них, без дополнительной сегментации.
 
-5. **Иерархическая суммаризация**: Для коротких транскриптов (≤15000 символов) — один LLM-запрос. Для длинных — чанки суммаризируются отдельно, затем объединяются.
+5. **Три стратегии суммаризации** по длине транскрипта:
+   - **Single pass** (< ~10 мин, ≤5000 символов) — один LLM-запрос на весь текст.
+   - **Rolling merge** (10–30 мин, 5000–15000 символов) — `summary_n = summarize(summary_{n-1} + chunk_n)`: модель накапливает контекст предыдущих частей.
+   - **Hierarchical** (> ~30 мин, >15000 символов) — каждый чанк суммаризируется независимо, затем все частичные саммари объединяются финальным запросом.
 
 ## Environment Variables
 
