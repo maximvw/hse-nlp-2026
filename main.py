@@ -18,7 +18,8 @@ from pipeline.diarize import (
     format_transcript,
 )
 from pipeline.summarize import summarize
-from pipeline.rag import build_index, ask
+from pipeline.index import build_index
+from pipeline.qa import build_qa_agent, ask
 
 console = Console()
 
@@ -83,8 +84,9 @@ def _run_summary(transcript_text: str, args):
 
 
 def _run_qa(diarized_segments: list[DiarizedSegment], args):
-    """Build RAG index and enter interactive Q&A loop."""
+    """Build index and enter interactive agent-based Q&A loop."""
     index = build_index(diarized_segments, embedding_model=args.embedding_model)
+    agent = build_qa_agent(index, model=args.llm_model)
 
     console.print(
         "\n[bold green]Q&A mode ready.[/bold green] "
@@ -104,7 +106,7 @@ def _run_qa(diarized_segments: list[DiarizedSegment], args):
         if question.lower() in ("exit", "q", "quit", "выход"):
             break
 
-        answer = ask(question, index, model=args.llm_model)
+        answer = ask(question, agent)
         console.print(Panel(answer, title="Ответ", border_style="cyan"))
         console.print()
 
@@ -131,8 +133,9 @@ def main():
     )
     parser.add_argument(
         "--llm-model",
+        # default="google/gemini-2.0-flash-lite-001",
         default="nvidia/nemotron-nano-9b-v2:free",
-        help="LLM model for summarization / Q&A via OpenRouter",
+        help="LLM model for summarization / Q&A via OpenRouter (must support tool calling for qa mode)",
     )
     parser.add_argument(
         "--embedding-model",
