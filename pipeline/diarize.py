@@ -16,39 +16,59 @@ console = Console()
 
 SAMPLE_RATE = 16000
 SPEAKER_MODEL = "microsoft/wavlm-base-sv"
+_EMBED_BATCH_SIZE = 8
+_MAX_EMBED_SAMPLES = 3 * SAMPLE_RATE  # 3s is enough for speaker ID; avoids huge padding
+
+_speaker_feature_extractor = None
+_speaker_model = None
 
 
-def _load_speaker_model():
-    """Load WavLM speaker verification model from HuggingFace."""
-    from transformers import AutoFeatureExtractor, WavLMForXVector
+def _get_speaker_model():
+    global _speaker_feature_extractor, _speaker_model
+    if _speaker_model is None:
+        from transformers import AutoFeatureExtractor, WavLMForXVector
+        console.print(f"  Loading speaker model [dim]{SPEAKER_MODEL}[/dim]...")
+        _speaker_feature_extractor = AutoFeatureExtractor.from_pretrained(SPEAKER_MODEL)
+        model = WavLMForXVector.from_pretrained(SPEAKER_MODEL)
+        model.eval()
+        _speaker_model = model
+    return _speaker_feature_extractor, _speaker_model
 
-    console.print(f"  Loading speaker model [dim]{SPEAKER_MODEL}[/dim]...")
-    feature_extractor = AutoFeatureExtractor.from_pretrained(SPEAKER_MODEL)
-    model = WavLMForXVector.from_pretrained(SPEAKER_MODEL)
-    model.eval()
-    return feature_extractor, model
 
-
-def _embed_segment(
-    audio_np: np.ndarray,
+def _embed_batch(
+    chunks: list[np.ndarray],
     feature_extractor,
     model: torch.nn.Module,
-) -> np.ndarray | None:
-    """Compute L2-normalized speaker embedding for one audio chunk (numpy, 16kHz)."""
-    if len(audio_np) < int(SAMPLE_RATE * 0.2):
-        return None
+    batch_size: int = _EMBED_BATCH_SIZE,
+) -> list[np.ndarray | None]:
+    """Compute L2-normalized embeddings for a list of audio chunks using batched inference."""
+    min_samples = int(SAMPLE_RATE * 0.2)
+    results: list[np.ndarray | None] = [None] * len(chunks)
 
-    inputs = feature_extractor(
-        audio_np,
-        sampling_rate=SAMPLE_RATE,
-        return_tensors="pt",
-        padding=True,
-    )
-    with torch.no_grad():
-        embedding = model(**inputs).embeddings  # (1, hidden_size)
+    # Only process chunks that are long enough
+    valid = [(i, c) for i, c in enumerate(chunks) if len(c) >= min_samples]
 
-    embedding = torch.nn.functional.normalize(embedding, dim=-1)
-    return embedding.squeeze(0).numpy()
+    for batch_start in range(0, len(valid), batch_size):
+        batch = valid[batch_start:batch_start + batch_size]
+        indices = [b[0] for b in batch]
+        audio_list = [b[1] for b in batch]
+
+        # Truncate to _MAX_EMBED_SAMPLES so padding stays bounded
+        audio_list = [a[:_MAX_EMBED_SAMPLES] for a in audio_list]
+        inputs = feature_extractor(
+            audio_list,
+            sampling_rate=SAMPLE_RATE,
+            return_tensors="pt",
+            padding=True,
+        )
+        with torch.inference_mode():
+            embeddings = model(**inputs).embeddings  # (B, hidden_size)
+
+        embeddings = torch.nn.functional.normalize(embeddings, dim=-1)
+        for k, idx in enumerate(indices):
+            results[idx] = embeddings[k].numpy()
+
+    return results
 
 
 @dataclass
@@ -86,7 +106,7 @@ def diarize(
 
     console.print("[bold]Running speaker diarization (WavLM-SV + clustering)...[/bold]")
 
-    feature_extractor, model = _load_speaker_model()
+    feature_extractor, model = _get_speaker_model()
 
     # Load full audio once, convert to numpy for feature extractor
     waveform, sr = torchaudio.load(str(audio_path))
@@ -96,13 +116,13 @@ def diarize(
         waveform = waveform.mean(dim=0, keepdim=True)
     audio_np = waveform.squeeze(0).numpy()  # (samples,)
 
-    # Extract embedding per VAD segment
-    embeddings: list[np.ndarray | None] = []
-    for seg in vad_segments:
-        start_sample = int(seg.start * SAMPLE_RATE)
-        end_sample = int(seg.end * SAMPLE_RATE)
-        chunk = audio_np[start_sample:end_sample]
-        embeddings.append(_embed_segment(chunk, feature_extractor, model))
+    # Extract embeddings in batches
+    chunks = [
+        audio_np[int(seg.start * SAMPLE_RATE):int(seg.end * SAMPLE_RATE)]
+        for seg in vad_segments
+    ]
+    console.print(f"  Embedding {len(chunks)} segments (batch_size={_EMBED_BATCH_SIZE})...")
+    embeddings = _embed_batch(chunks, feature_extractor, model)
 
     valid_indices = [i for i, e in enumerate(embeddings) if e is not None]
     valid_embeddings = np.array([embeddings[i] for i in valid_indices])

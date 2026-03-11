@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -112,17 +113,18 @@ def build_chatbot_tools(state: VideoState, args) -> list:
             t = _step("VAD", t)
 
             chunks = group_segments(vad_segments)
-            transcript_segments = transcribe(
-                audio_path, chunks,
-                model_name=args.whisper_model,
-                n_threads=args.threads,
-                language=args.language,
-                n_workers=args.workers,
-            )
-            t = _step("transcribe", t)
 
-            speaker_turns = diarize(audio_path, vad_segments)
-            t = _step("diarize", t)
+            # Run transcription and diarization concurrently — they only need audio_path
+            console.print("  [dim]Running transcribe + diarize in parallel...[/dim]")
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                f_transcript = pool.submit(
+                    transcribe, audio_path, chunks,
+                    args.whisper_model, args.threads, args.language, args.workers,
+                )
+                f_diarize = pool.submit(diarize, audio_path, vad_segments)
+                transcript_segments = f_transcript.result()
+                speaker_turns = f_diarize.result()
+            t = _step("transcribe+diarize", t)
 
             diarized = align_transcript_with_speakers(transcript_segments, speaker_turns)
             transcript_text = format_transcript(diarized)
