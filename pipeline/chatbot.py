@@ -18,7 +18,7 @@ from pipeline.index import TranscriptIndex, build_index
 from pipeline.summarize import summarize
 from pipeline.transcribe import transcribe
 from pipeline.vad import run_vad, group_segments
-
+    
 console = Console()
 
 SYSTEM_PROMPT = """\
@@ -96,17 +96,34 @@ def build_chatbot_tools(state: VideoState, args) -> list:
         try:
             t0 = time.perf_counter()
 
+            def _step(name: str, t_prev: float) -> float:
+                t = time.perf_counter()
+                console.print(f"  [dim]{name}: {t - t_prev:.1f}s[/dim]")
+                return t
+
+            t = t0
             raw_audio = download_audio(url, output_dir)
+            t = _step("download", t)
+
             audio_path = preprocess_audio(raw_audio, output_dir)
+            t = _step("preprocess", t)
+
             vad_segments = run_vad(audio_path)
+            t = _step("VAD", t)
+
             chunks = group_segments(vad_segments)
             transcript_segments = transcribe(
                 audio_path, chunks,
                 model_name=args.whisper_model,
                 n_threads=args.threads,
                 language=args.language,
+                n_workers=args.workers,
             )
+            t = _step("transcribe", t)
+
             speaker_turns = diarize(audio_path, vad_segments)
+            t = _step("diarize", t)
+
             diarized = align_transcript_with_speakers(transcript_segments, speaker_turns)
             transcript_text = format_transcript(diarized)
 
@@ -114,15 +131,18 @@ def build_chatbot_tools(state: VideoState, args) -> list:
             transcript_path.write_text(transcript_text, encoding="utf-8")
 
             idx = build_index(diarized, embedding_model=args.embedding_model)
+            t = _step("index", t)
+
             state.index = idx
             state.processed_url = url
 
-            elapsed = (time.perf_counter() - t0) / 60
+            elapsed = time.perf_counter() - t0
             n_speakers = len({seg.speaker for seg in diarized})
             duration = _fmt_time(diarized[-1].end if diarized else 0)
 
+            console.print(f"[bold green]Готово за {elapsed:.1f}s[/bold green]")
             return (
-                f"Видео обработано за {elapsed:.1f} мин.\n"
+                f"Видео обработано за {elapsed:.0f}с ({elapsed/60:.1f} мин).\n"
                 f"Длительность: {duration}, спикеров: {n_speakers}.\n"
                 f"Транскрипция сохранена: {transcript_path}.\n"
                 f"Теперь можешь задавать вопросы по видео."

@@ -10,6 +10,19 @@ console = Console()
 
 SAMPLE_RATE = 16000
 
+_vad_model = None
+_vad_utils = None
+
+
+def _get_vad_model():
+    global _vad_model, _vad_utils
+    if _vad_model is None:
+        console.print("  Loading Silero VAD model...")
+        _vad_model, _vad_utils = torch.hub.load(
+            "snakers4/silero-vad", "silero_vad", trust_repo=True
+        )
+    return _vad_model, _vad_utils
+
 
 @dataclass
 class SpeechSegment:
@@ -27,9 +40,7 @@ def run_vad(audio_path: Path, merge_gap: float = 0.5, min_duration: float = 0.3)
     """
     console.print("[bold]Running VAD segmentation (Silero)...[/bold]")
 
-    model, utils = torch.hub.load(
-        "snakers4/silero-vad", "silero_vad", trust_repo=True
-    )
+    model, utils = _get_vad_model()
     get_speech_timestamps, _, read_audio, _, _ = utils
 
     wav = read_audio(str(audio_path), sampling_rate=SAMPLE_RATE)
