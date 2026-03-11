@@ -14,7 +14,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 from pipeline.diarize import diarize, align_transcript_with_speakers, format_transcript
-from pipeline.download import download_audio, preprocess_audio
+from pipeline.download import download_audio, preprocess_audio, fetch_video_metadata, format_metadata, VideoMetadata, extract_video_id
 from pipeline.index import TranscriptIndex, build_index
 from pipeline.summarize import summarize
 from pipeline.transcribe import transcribe
@@ -27,6 +27,7 @@ SYSTEM_PROMPT = """\
 
 Твои возможности:
 - process_video(url) — скачать и обработать видео по ссылке (транскрипция + диаризация спикеров)
+- get_video_info() — название, описание, канал, теги, главы видео (метаданные из YouTube)
 - summarize_video() — сделать краткое содержание обработанного видео
 - get_transcript_metadata() — количество спикеров, длительность, статистика по времени речи
 - get_segments_by_speaker(speaker_id, start_min, end_min) — реплики конкретного спикера
@@ -35,11 +36,12 @@ SYSTEM_PROMPT = """\
 
 Правила:
 1. Как только пользователь присылает YouTube-ссылку — сразу вызывай process_video, не переспрашивай.
-2. Для структурных вопросов ("сколько спикеров", "кто говорил дольше") → get_transcript_metadata.
-3. Для вопросов о конкретном спикере → get_segments_by_speaker.
-4. Для вопросов о конкретном времени → get_segments_by_time.
-5. Для тематических вопросов ("что обсуждали про X") → semantic_search.
-6. До загрузки видео можешь просто общаться, но напоминай что ждёшь ссылку.
+2. Для вопросов о названии, теме, канале, главах видео → get_video_info.
+3. Для структурных вопросов ("сколько спикеров", "кто говорил дольше") → get_transcript_metadata.
+4. Для вопросов о конкретном спикере → get_segments_by_speaker.
+5. Для вопросов о конкретном времени → get_segments_by_time.
+6. Для тематических вопросов ("что обсуждали про X") → semantic_search.
+7. До загрузки видео можешь просто общаться, но напоминай что ждёшь ссылку.
 
 Отвечай на русском. Всегда указывай таймкоды и имена спикеров в ответах по видео.
 """
@@ -49,6 +51,7 @@ SYSTEM_PROMPT = """\
 class VideoState:
     index: TranscriptIndex | None = None
     processed_url: str | None = None
+    metadata: VideoMetadata | None = None
 
 
 def _get_llm(model: str) -> ChatOpenAI:
@@ -81,7 +84,7 @@ def _segments_to_text(segments) -> str:
 
 
 def build_chatbot_tools(state: VideoState, args) -> list:
-    output_dir = Path(args.output_dir)
+    base_dir = Path(args.output_dir)
 
     @tool
     def process_video(url: str) -> str:
@@ -91,7 +94,9 @@ def build_chatbot_tools(state: VideoState, args) -> list:
         Args:
             url: Ссылка на YouTube-видео.
         """
-        console.print(f"\n[bold]Processing:[/bold] {url}")
+        video_id = extract_video_id(url)
+        output_dir = base_dir / video_id
+        console.print(f"\n[bold]Processing:[/bold] {url}  [dim](output: {output_dir})[/dim]")
         output_dir.mkdir(parents=True, exist_ok=True)
 
         try:
@@ -103,6 +108,13 @@ def build_chatbot_tools(state: VideoState, args) -> list:
                 return t
 
             t = t0
+            try:
+                state.metadata = fetch_video_metadata(url)
+            except Exception as e:
+                console.print(f"  [yellow]Metadata fetch failed: {e}[/yellow]")
+                state.metadata = None
+            t = _step("metadata", t)
+
             raw_audio = download_audio(url, output_dir)
             t = _step("download", t)
 
@@ -151,6 +163,15 @@ def build_chatbot_tools(state: VideoState, args) -> list:
             )
         except Exception as e:
             return f"Ошибка при обработке видео: {e}"
+
+    @tool
+    def get_video_info() -> str:
+        """Возвращает метаданные видео из YouTube: название, канал, дату публикации,
+        просмотры, теги, главы и описание.
+        Используй для вопросов: 'о чём это видео?', 'что за канал?', 'какие темы в видео?'"""
+        if state.metadata is None:
+            return "Видео ещё не загружено. Пришли ссылку на YouTube-видео."
+        return format_metadata(state.metadata)
 
     @tool
     def summarize_video() -> str:
@@ -241,6 +262,7 @@ def build_chatbot_tools(state: VideoState, args) -> list:
 
     return [
         process_video,
+        get_video_info,
         summarize_video,
         get_transcript_metadata,
         get_segments_by_speaker,

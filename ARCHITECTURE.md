@@ -28,7 +28,7 @@ nlp-hw/
   main.py                    # Entry point, argparse, запуск чат-бота
   pipeline/
     __init__.py
-    download.py              # download_audio(), preprocess_audio()
+    download.py              # download_audio(), preprocess_audio(), fetch_video_metadata()
     vad.py                   # run_vad(), group_segments()
     transcribe.py            # transcribe()
     diarize.py               # diarize(), align_transcript_with_speakers(), format_transcript()
@@ -69,8 +69,9 @@ _video  _video    transcript  by_speaker    by_time         search
 ```python
 @dataclass
 class VideoState:
-    index: TranscriptIndex | None = None   # None до обработки видео
+    index: TranscriptIndex | None = None        # None до обработки видео
     processed_url: str | None = None
+    metadata: VideoMetadata | None = None       # YouTube-метаданные видео
 ```
 
 До вызова `process_video` все инструменты работы с видео возвращают подсказку вместо ошибки.
@@ -80,6 +81,7 @@ class VideoState:
 | Инструмент | Когда использовать |
 |---|---|
 | `process_video(url)` | Получена YouTube-ссылка |
+| `get_video_info()` | «О чём видео?», «что за канал?», «какие темы/главы?» |
 | `summarize_video()` | «Сделай саммари», «краткое содержание» |
 | `get_transcript_metadata()` | «Сколько спикеров?», «кто говорил дольше?» |
 | `get_segments_by_speaker(id, start_min, end_min)` | «Что сказал спикер №2 на 10-й минуте?» |
@@ -111,6 +113,8 @@ class TranscriptIndex:
 Запускается инструментом `process_video(url)`:
 
 ```
+fetch_video_metadata(url) → VideoMetadata   (yt-dlp -j, без скачивания)
+        ↓ (параллельно с metadata)
 download_audio(url) → raw_audio.wav
         ↓
 preprocess_audio() → audio_16k.wav   (ffmpeg: 16kHz mono)
