@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import functools
+import json
 from dataclasses import dataclass
+from pathlib import Path
 
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -10,6 +13,14 @@ from rich.console import Console
 from pipeline.diarize import DiarizedSegment
 
 console = Console()
+
+@functools.lru_cache(maxsize=4)
+def _get_embeddings(model_name: str) -> HuggingFaceEmbeddings:
+    console.print(f"  Loading embedding model [dim]{model_name}[/dim]...")
+    return HuggingFaceEmbeddings(
+        model_name=model_name,
+        model_kwargs={"device": "cpu"},
+    )
 
 
 def _fmt_time(seconds: float) -> str:
@@ -78,6 +89,33 @@ class TranscriptIndex:
         """Семантический поиск по тексту транскрипции."""
         return self.faiss.similarity_search(query, k=k)
 
+    def save(self, directory: Path) -> None:
+        """Сохранить индекс на диск: FAISS + сегменты в JSON."""
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        self.faiss.save_local(str(directory / "faiss"))
+        segs = [{"speaker": s.speaker, "start": s.start, "end": s.end, "text": s.text}
+                for s in self.segments]
+        (directory / "segments.json").write_text(
+            json.dumps(segs, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    @classmethod
+    def load(cls, directory: Path, embedding_model: str) -> "TranscriptIndex":
+        """Загрузить индекс с диска. Возвращает None если файлов нет."""
+        directory = Path(directory)
+        faiss_dir = directory / "faiss"
+        segs_file = directory / "segments.json"
+        if not faiss_dir.exists() or not segs_file.exists():
+            raise FileNotFoundError(f"Index not found in {directory}")
+        embeddings = _get_embeddings(embedding_model)
+        faiss_index = FAISS.load_local(
+            str(faiss_dir), embeddings, allow_dangerous_deserialization=True
+        )
+        raw = json.loads(segs_file.read_text(encoding="utf-8"))
+        segments = [DiarizedSegment(**s) for s in raw]
+        return cls(segments=segments, faiss=faiss_index)
+
 
 def build_index(
     segments: list[DiarizedSegment],
@@ -91,11 +129,7 @@ def build_index(
     chunks = _make_chunks(segments, chunk_max_chars)
     console.print(f"  Created [green]{len(chunks)}[/green] chunks")
 
-    embeddings = HuggingFaceEmbeddings(
-        model_name=embedding_model,
-        model_kwargs={"device": "cpu"},
-    )
-
+    embeddings = _get_embeddings(embedding_model)
     faiss_index = FAISS.from_documents(chunks, embeddings)
     console.print("  Index built")
 

@@ -2,15 +2,20 @@
 
 ## Overview
 
-Чат-бот для анализа YouTube-видео на русском языке. Весь inference (кроме LLM) выполняется локально на Apple Silicon. LLM-запросы — через OpenRouter API (OpenAI-совместимый интерфейс).
+Чат-бот для анализа YouTube-видео на русском языке. Весь inference (кроме LLM) выполняется локально на CPU. LLM-запросы — через OpenRouter API (OpenAI-совместимый интерфейс).
 
-Пользователь общается с агентом в терминале. Агент получает YouTube-ссылку, запускает пайплайн обработки и отвечает на вопросы, самостоятельно выбирая подходящий инструмент.
+Доступны два режима запуска:
+- **Веб-интерфейс** (`app.py`) — Streamlit с авторизацией, историей чатов и поддержкой нескольких пользователей.
+- **CLI** (`main.py`) — терминальный чат-бот.
+
+Агент получает YouTube-ссылку, запускает пайплайн обработки и отвечает на вопросы, самостоятельно выбирая подходящий инструмент.
 
 ## Tech Stack
 
 | Компонент | Технология |
 |---|---|
 | Package manager | uv |
+| Web UI | Streamlit + bcrypt (авторизация) |
 | Audio download | yt-dlp (CLI) |
 | Audio preprocessing | ffmpeg (CLI) |
 | VAD | Silero VAD (torch.hub) |
@@ -20,12 +25,18 @@
 | Semantic search | sentence-transformers + FAISS (faiss-cpu) |
 | CLI output | rich |
 | Config | python-dotenv |
+| Containerization | Docker (multi-stage build) |
 
 ## Project Structure
 
 ```
 nlp-hw/
-  main.py                    # Entry point, argparse, запуск чат-бота
+  main.py                    # Entry point CLI, argparse
+  app.py                     # Streamlit web UI (multi-user, chat history)
+  auth.py                    # Авторизация: bcrypt-хеши в data/users.yaml
+  manage_users.py            # CLI для управления пользователями
+  Dockerfile                 # Multi-stage: builder (gcc/cmake) → runtime
+  docker-compose.yml         # Volumes: model_cache, ./data, ./output
   pipeline/
     __init__.py
     download.py              # download_audio(), preprocess_audio(), fetch_video_metadata()
@@ -35,27 +46,35 @@ nlp-hw/
     summarize.py             # summarize() — три стратегии: single pass / rolling merge / hierarchical
     index.py                 # TranscriptIndex, build_index() — структурированный доступ + FAISS
     chatbot.py               # VideoState, build_chatbot_tools(), run_chatbot()
+  data/
+    users.yaml               # Пользователи (bcrypt-хеши)
+    chats/{username}/        # История чатов в JSON
   output/                    # Генерируемые файлы (gitignored)
-    raw_audio.wav
-    audio_16k.wav
-    transcript.txt
+    {video_id}/
+      raw_audio.wav
+      audio_16k.wav
+      transcript.txt
+      metadata.json
+      index/                 # FAISS-индекс + сегменты
+  .streamlit/
+    config.toml              # timeout=7200 (длинные видео)
 ```
 
 ## Agent Architecture
 
-Агент построен на `langchain.agents.create_agent` (LangGraph под капотом). Он получает 6 инструментов, привязанных к мутабельному `VideoState` через замыкания.
+Агент построен на `langchain.agents.create_agent` (LangGraph под капотом). Он получает 7 инструментов, привязанных к мутабельному `VideoState` через замыкания.
 
 ```
 Пользователь вводит текст
          ↓
    LLM-агент (tool calling)
          ↓ выбирает инструмент
-  ┌──────┬────────┬──────────┬──────────────┬────────────────┬───────────────┐
-  │      │        │          │              │                │               │
-  ▼      ▼        ▼          ▼              ▼                ▼               ▼
-process summarize get_       get_segments_  get_segments_   semantic_
-_video  _video    transcript  by_speaker    by_time         search
-                  _metadata
+  ┌──────┬──────────┬────────┬──────────┬─────────────┬──────────────┬───────────────┐
+  │      │          │        │          │             │              │               │
+  ▼      ▼          ▼        ▼          ▼             ▼              ▼               ▼
+process get_video summarize get_       get_segments_ get_segments_ semantic_
+_video  _info    _video    transcript  by_speaker   by_time        search
+                           _metadata
   │
   ▼ (заполняет VideoState)
   TranscriptIndex
@@ -106,7 +125,9 @@ class TranscriptIndex:
 
 ### История диалога
 
-Полная история сообщений накапливается между вопросами и передаётся агенту при каждом запросе — агент помнит контекст разговора.
+В **CLI**: полная история сообщений накапливается между вопросами и передаётся агенту при каждом запросе.
+
+В **веб-UI**: история хранится в `data/chats/{username}/{chat_id}.json`. При переключении между чатами индекс и история восстанавливаются с диска.
 
 ## Processing Pipeline
 
@@ -123,13 +144,11 @@ run_vad() → list[SpeechSegment]       (Silero VAD)
         ↓
 group_segments() → chunks             (группировка до 30 сек для whisper)
         ↓
-transcribe() → list[TranscriptSegment] (whisper.cpp, word-level timestamps)
-        ↓
-diarize() → list[(start, end, speaker)] (WavLM-SV embeddings + AgglomerativeClustering)
+transcribe() + diarize()              (параллельно: whisper.cpp + WavLM-SV embeddings)
         ↓
 align_transcript_with_speakers() → list[DiarizedSegment]
         ↓
-build_index() → TranscriptIndex        (сохраняется в VideoState)
+build_index() → TranscriptIndex        (сохраняется в VideoState + на диск)
 ```
 
 ## Data Types
@@ -154,16 +173,28 @@ TranscriptIndex      (segments: list[DiarizedSegment], faiss: FAISS)
 
 4. **WavLM-SV вместо pyannote**: Не требует HF-токен и принятия лицензий. VAD-сегменты используются повторно — embeddings считаются только для них, без дополнительной сегментации.
 
-5. **Три стратегии суммаризации** по длине транскрипта:
+5. **Параллельное выполнение transcribe + diarize**: Оба шага работают над одними VAD-сегментами независимо, запускаются одновременно для ускорения обработки.
+
+6. **Три стратегии суммаризации** по длине транскрипта:
    - **Single pass** (< ~10 мин, ≤5000 символов) — один LLM-запрос на весь текст.
    - **Rolling merge** (10–30 мин, 5000–15000 символов) — `summary_n = summarize(summary_{n-1} + chunk_n)`: модель накапливает контекст предыдущих частей.
    - **Hierarchical** (> ~30 мин, >15000 символов) — каждый чанк суммаризируется независимо, затем все частичные саммари объединяются финальным запросом.
+
+7. **Docker multi-stage build**: `builder`-стадия с gcc/cmake компилирует `pywhispercpp`, `runtime`-стадия копирует только `.venv` — образ получается ~500 МБ легче.
 
 ## Environment Variables
 
 | Variable | Used in | Purpose |
 |---|---|---|
 | `OPENROUTER_API_KEY` | `pipeline/chatbot.py`, `pipeline/summarize.py` | API-ключ OpenRouter |
+| `HF_TOKEN` | `pipeline/diarize.py` | HuggingFace токен (опционально) |
+| `OUTPUT_DIR` | `app.py`, `main.py` | Директория для обработанных файлов |
+| `WHISPER_MODEL` | `app.py`, `main.py` | Модель Whisper |
+| `WHISPER_THREADS` | `app.py`, `main.py` | Потоков на воркер |
+| `WHISPER_WORKERS` | `app.py`, `main.py` | Параллельных воркеров |
+| `LLM_MODEL` | `app.py`, `main.py` | Модель LLM через OpenRouter |
+| `EMBEDDING_MODEL` | `app.py`, `main.py` | Модель эмбеддингов |
+| `LANGUAGE` | `app.py`, `main.py` | Язык ASR |
 
 ## External Dependencies (system)
 

@@ -1,0 +1,37 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nlp-hw:latest
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8501}:8501"
+    env_file:
+      - .env
+    environment:
+      OUTPUT_DIR: /app/output
+      WHISPER_MODEL: ${WHISPER_MODEL:-large-v3-turbo-q5_0}
+      LLM_MODEL: ${LLM_MODEL:-nvidia/nemotron-nano-9b-v2:free}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2}
+      LANGUAGE: ${LANGUAGE:-ru}
+      WHISPER_THREADS: ${WHISPER_THREADS:-4}
+      WHISPER_WORKERS: ${WHISPER_WORKERS:-2}
+    volumes:
+      # ML models cache (~5 GB, downloaded once, persisted across restarts)
+      - model_cache:/cache
+      # User accounts + chat history (keep on host for easy backup)
+      - ./data:/app/data
+      # Processed video files (transcripts, FAISS indexes, audio)
+      - ./output:/app/output
+    # Whisper can be CPU-heavy — cap at available cores
+    # Uncomment and adjust if running on a shared server:
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: "4"
+    #       memory: 12G
+
+volumes:
+  model_cache:
+    driver: local

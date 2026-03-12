@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+import json
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -96,6 +98,26 @@ def build_chatbot_tools(state: VideoState, args) -> list:
         """
         video_id = extract_video_id(url)
         output_dir = base_dir / video_id
+
+        # Fast path: video already processed — load from disk without re-downloading
+        if (output_dir / "index").exists():
+            try:
+                state.index = TranscriptIndex.load(output_dir / "index", args.embedding_model)
+                state.processed_url = url
+                meta_file = output_dir / "metadata.json"
+                if meta_file.exists():
+                    state.metadata = VideoMetadata(**json.loads(meta_file.read_text(encoding="utf-8")))
+                n_speakers = len({seg.speaker for seg in state.index.segments})
+                duration = _fmt_time(state.index.segments[-1].end if state.index.segments else 0)
+                console.print(f"\n[bold green]Загружено из кэша:[/bold green] {url}")
+                return (
+                    f"Видео уже обработано, загружено из кэша.\n"
+                    f"Длительность: {duration}, спикеров: {n_speakers}.\n"
+                    f"Можешь задавать вопросы по видео."
+                )
+            except Exception as e:
+                console.print(f"  [yellow]Кэш повреждён, обрабатываем заново: {e}[/yellow]")
+
         console.print(f"\n[bold]Processing:[/bold] {url}  [dim](output: {output_dir})[/dim]")
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -110,6 +132,11 @@ def build_chatbot_tools(state: VideoState, args) -> list:
             t = t0
             try:
                 state.metadata = fetch_video_metadata(url)
+                if state.metadata:
+                    (output_dir / "metadata.json").write_text(
+                        json.dumps(dataclasses.asdict(state.metadata), ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
             except Exception as e:
                 console.print(f"  [yellow]Metadata fetch failed: {e}[/yellow]")
                 state.metadata = None
@@ -145,6 +172,7 @@ def build_chatbot_tools(state: VideoState, args) -> list:
             transcript_path.write_text(transcript_text, encoding="utf-8")
 
             idx = build_index(diarized, embedding_model=args.embedding_model)
+            idx.save(output_dir / "index")
             t = _step("index", t)
 
             state.index = idx
@@ -269,6 +297,24 @@ def build_chatbot_tools(state: VideoState, args) -> list:
         get_segments_by_time,
         semantic_search,
     ]
+
+
+def create_chatbot(args, llm=None):
+    """Create agent and VideoState for programmatic use (e.g. Streamlit).
+
+    Args:
+        args: Namespace with model/path settings.
+        llm: Optional pre-built LLM instance. If None, one is created from args.
+
+    Returns:
+        (agent, state) — compiled LangGraph agent and mutable VideoState.
+    """
+    if llm is None:
+        llm = _get_llm(args.llm_model)
+    state = VideoState()
+    tools = build_chatbot_tools(state, args)
+    agent = create_agent(model=llm, tools=tools, system_prompt=SYSTEM_PROMPT)
+    return agent, state
 
 
 def run_chatbot(args):

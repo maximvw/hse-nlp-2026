@@ -1,0 +1,6 @@
+[server]
+# process_video can take 10-30+ minutes for long videos
+timeout = 7200
+
+[browser]
+gatherUsageStats = false

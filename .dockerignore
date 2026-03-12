@@ -1,0 +1,34 @@
+# Version control
+.git
+.gitignore
+
+# Python artifacts
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.egg-info
+dist/
+build/
+
+# Local data (mounted as volumes in docker-compose)
+output/
+data/
+
+# Secrets (passed via env_file in docker-compose)
+.env
+
+# Dev / CI
+.github/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Docs
+*.md
+ARCHITECTURE*
+LICENSE
+
+# macOS
+.DS_Store

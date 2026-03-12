@@ -12,5 +12,9 @@ wheels/
 # Environment variables
 .env
 
-# Output files
-output*
+# Output files (processed videos, transcripts, FAISS indexes)
+output/
+
+# User data (passwords, chat history) — keep data/ dir itself tracked via .gitkeep
+data/users.yaml
+data/chats/
