@@ -68,8 +68,13 @@ uv run python main.py
 | `--llm-model` | `nvidia/nemotron-nano-9b-v2:free` | Модель LLM через OpenRouter (нужен tool calling) |
 | `--embedding-model` | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | Модель эмбеддингов |
 | `--language` | `ru` | Язык ASR |
-| `--threads` | `8` | Потоки для whisper.cpp |
+| `--threads` | `4` | Потоков на один whisper-процесс |
+| `--workers` | `1` | Параллельных whisper-процессов |
+| `--auto-workers` | — | Автоматически: `workers = cpu_count // 4`, `threads = 4` |
 
 ## Результаты
 
-После обработки видео в `--output-dir` сохраняется `transcript.txt` — полный транскрипт с таймкодами и именами спикеров.
+После обработки в `--output-dir/{video_id}/` сохраняются:
+- `transcript.txt` — транскрипт с таймкодами и именами спикеров
+- `metadata.json` — метаданные YouTube
+- `index/segments.json` + `index/faiss/` — кэш индекса (повторный запуск загрузит без обработки)

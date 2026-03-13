@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import dataclasses
+import json
 from dataclasses import dataclass
+from pathlib import Path
 
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -77,6 +80,37 @@ class TranscriptIndex:
     def semantic_search(self, query: str, k: int = 5) -> list[Document]:
         """Семантический поиск по тексту транскрипции."""
         return self.faiss.similarity_search(query, k=k)
+
+    def save(self, path: Path) -> None:
+        """Сохранить индекс на диск: segments.json + faiss/."""
+        path.mkdir(parents=True, exist_ok=True)
+        segments_data = [dataclasses.asdict(s) for s in self.segments]
+        (path / "segments.json").write_text(
+            json.dumps(segments_data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        self.faiss.save_local(str(path / "faiss"))
+
+    @classmethod
+    def try_load(cls, path: Path, embedding_model: str) -> TranscriptIndex | None:
+        """Попытаться загрузить индекс с диска. Возвращает None если файлов нет."""
+        segments_file = path / "segments.json"
+        faiss_dir = path / "faiss"
+        if not segments_file.exists() or not faiss_dir.exists():
+            return None
+        try:
+            console.print(f"  [dim]Loading cached index from {path}...[/dim]")
+            segments_data = json.loads(segments_file.read_text(encoding="utf-8"))
+            segments = [DiarizedSegment(**s) for s in segments_data]
+            embeddings = HuggingFaceEmbeddings(
+                model_name=embedding_model, model_kwargs={"device": "cpu"}
+            )
+            faiss_index = FAISS.load_local(
+                str(faiss_dir), embeddings, allow_dangerous_deserialization=True
+            )
+            return cls(segments=segments, faiss=faiss_index)
+        except Exception as e:
+            console.print(f"  [yellow]Cache load failed: {e}[/yellow]")
+            return None
 
 
 def build_index(

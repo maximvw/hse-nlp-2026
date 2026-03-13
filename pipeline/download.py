@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import subprocess
 from dataclasses import dataclass, field
@@ -68,6 +69,24 @@ def fetch_video_metadata(url: str) -> VideoMetadata:
     )
 
 
+def save_metadata(meta: VideoMetadata, path: Path) -> None:
+    """Сохранить метаданные видео в JSON-файл."""
+    path.write_text(
+        json.dumps(dataclasses.asdict(meta), ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def try_load_metadata(path: Path) -> VideoMetadata | None:
+    """Загрузить метаданные из JSON-файла. Возвращает None если файла нет."""
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return VideoMetadata(**data)
+    except Exception:
+        return None
+
+
 def format_metadata(meta: VideoMetadata) -> str:
     """Format video metadata as a human-readable string."""
     lines = [
@@ -96,15 +115,19 @@ def format_metadata(meta: VideoMetadata) -> str:
 def download_audio(url: str, output_dir: Path) -> Path:
     """Download audio from YouTube video using yt-dlp."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_template = str(output_dir / "raw_audio.%(ext)s")
+    raw_path = output_dir / "raw_audio.wav"
 
+    if raw_path.exists():
+        console.print(f"[dim]Audio already downloaded, skipping: {raw_path}[/dim]")
+        return raw_path
+
+    output_template = str(output_dir / "raw_audio.%(ext)s")
     console.print(f"[bold]Downloading audio from:[/bold] {url}")
     subprocess.run(
         [
             "yt-dlp",
             "-x",
             "--audio-format", "wav",
-            "--force-overwrites",
             "-o", output_template,
             "--no-playlist",
             url,
@@ -112,7 +135,6 @@ def download_audio(url: str, output_dir: Path) -> Path:
         check=True,
     )
 
-    raw_path = output_dir / "raw_audio.wav"
     if not raw_path.exists():
         raise FileNotFoundError(f"Downloaded audio not found at {raw_path}")
 
@@ -122,6 +144,10 @@ def download_audio(url: str, output_dir: Path) -> Path:
 def preprocess_audio(input_path: Path, output_dir: Path) -> Path:
     """Convert audio to 16kHz mono WAV for ASR/VAD."""
     output_path = output_dir / "audio_16k.wav"
+
+    if output_path.exists():
+        console.print(f"[dim]Preprocessed audio already exists, skipping: {output_path}[/dim]")
+        return output_path
 
     console.print("[bold]Preprocessing audio:[/bold] 16kHz mono WAV")
     subprocess.run(

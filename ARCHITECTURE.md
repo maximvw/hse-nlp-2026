@@ -36,26 +36,31 @@ nlp-hw/
     index.py                 # TranscriptIndex, build_index() — структурированный доступ + FAISS
     chatbot.py               # VideoState, build_chatbot_tools(), run_chatbot()
   output/                    # Генерируемые файлы (gitignored)
-    raw_audio.wav
-    audio_16k.wav
-    transcript.txt
+    {video_id}/
+      raw_audio.wav
+      audio_16k.wav
+      transcript.txt
+      metadata.json          # YouTube-метаданные (кэш)
+      index/
+        segments.json        # Диаризованные сегменты (кэш)
+        faiss/               # FAISS-индекс (кэш)
 ```
 
 ## Agent Architecture
 
-Агент построен на `langchain.agents.create_agent` (LangGraph под капотом). Он получает 6 инструментов, привязанных к мутабельному `VideoState` через замыкания.
+Агент построен на `langchain.agents.create_agent` (LangGraph под капотом). Он получает 7 инструментов, привязанных к мутабельному `VideoState` через замыкания.
 
 ```
 Пользователь вводит текст
          ↓
    LLM-агент (tool calling)
          ↓ выбирает инструмент
-  ┌──────┬────────┬──────────┬──────────────┬────────────────┬───────────────┐
-  │      │        │          │              │                │               │
-  ▼      ▼        ▼          ▼              ▼                ▼               ▼
-process summarize get_       get_segments_  get_segments_   semantic_
-_video  _video    transcript  by_speaker    by_time         search
-                  _metadata
+  ┌──────┬──────────┬────────┬──────────┬──────────────┬────────────────┬───────────────┐
+  │      │          │        │          │              │                │               │
+  ▼      ▼          ▼        ▼          ▼              ▼                ▼               ▼
+process get_video summarize get_       get_segments_  get_segments_   semantic_
+_video  _info     _video    transcript  by_speaker    by_time         search
+                            _metadata
   │
   ▼ (заполняет VideoState)
   TranscriptIndex
@@ -114,7 +119,7 @@ class TranscriptIndex:
 
 ```
 fetch_video_metadata(url) → VideoMetadata   (yt-dlp -j, без скачивания)
-        ↓ (параллельно с metadata)
+        ↓
 download_audio(url) → raw_audio.wav
         ↓
 preprocess_audio() → audio_16k.wav   (ffmpeg: 16kHz mono)
@@ -158,6 +163,14 @@ TranscriptIndex      (segments: list[DiarizedSegment], faiss: FAISS)
    - **Single pass** (< ~10 мин, ≤5000 символов) — один LLM-запрос на весь текст.
    - **Rolling merge** (10–30 мин, 5000–15000 символов) — `summary_n = summarize(summary_{n-1} + chunk_n)`: модель накапливает контекст предыдущих частей.
    - **Hierarchical** (> ~30 мин, >15000 символов) — каждый чанк суммаризируется независимо, затем все частичные саммари объединяются финальным запросом.
+
+## Caching
+
+`process_video` проверяет кэш в трёх уровнях:
+
+1. **In-session**: если `state.processed_url == url` и индекс уже в памяти — сразу возвращает результат.
+2. **Cross-session (disk)**: если в `output/{video_id}/index/` есть `segments.json` и `faiss/` — загружает без повторной обработки.
+3. **Полная обработка**: если кэша нет, запускает весь пайплайн и сохраняет `segments.json`, `faiss/` и `metadata.json` на диск.
 
 ## Environment Variables
 

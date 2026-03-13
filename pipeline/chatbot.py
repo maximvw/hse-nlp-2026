@@ -14,7 +14,10 @@ from rich.console import Console
 from rich.panel import Panel
 
 from pipeline.diarize import diarize, align_transcript_with_speakers, format_transcript
-from pipeline.download import download_audio, preprocess_audio, fetch_video_metadata, format_metadata, VideoMetadata, extract_video_id
+from pipeline.download import (
+    download_audio, preprocess_audio, fetch_video_metadata, format_metadata,
+    save_metadata, try_load_metadata, VideoMetadata, extract_video_id,
+)
 from pipeline.index import TranscriptIndex, build_index
 from pipeline.summarize import summarize
 from pipeline.transcribe import transcribe
@@ -94,11 +97,39 @@ def build_chatbot_tools(state: VideoState, args) -> list:
         Args:
             url: Ссылка на YouTube-видео.
         """
+        # 1. In-session cache: видео уже обработано в этом сеансе
+        if state.processed_url == url and state.index is not None:
+            meta_title = state.metadata.title if state.metadata else ""
+            console.print("[bold green]Видео уже в памяти[/bold green]")
+            return (
+                f"Видео уже обработано{f': {meta_title}' if meta_title else ''}. "
+                "Можешь задавать вопросы по видео."
+            )
+
         video_id = extract_video_id(url)
         output_dir = base_dir / video_id
+        index_dir = output_dir / "index"
+        metadata_path = output_dir / "metadata.json"
         console.print(f"\n[bold]Processing:[/bold] {url}  [dim](output: {output_dir})[/dim]")
         output_dir.mkdir(parents=True, exist_ok=True)
 
+        # 2. Cross-session cache: пытаемся загрузить индекс с диска
+        cached_index = TranscriptIndex.try_load(index_dir, args.embedding_model)
+        if cached_index is not None:
+            state.index = cached_index
+            state.processed_url = url
+            state.metadata = try_load_metadata(metadata_path)
+            n_speakers = len({seg.speaker for seg in cached_index.segments})
+            duration = _fmt_time(cached_index.segments[-1].end if cached_index.segments else 0)
+            meta_title = state.metadata.title if state.metadata else ""
+            console.print("[bold green]Загружено из кэша[/bold green]")
+            return (
+                f"Видео загружено из кэша{f': {meta_title}' if meta_title else ''}.\n"
+                f"Длительность: {duration}, спикеров: {n_speakers}.\n"
+                f"Можешь задавать вопросы по видео."
+            )
+
+        # 3. Полная обработка
         try:
             t0 = time.perf_counter()
 
@@ -108,11 +139,17 @@ def build_chatbot_tools(state: VideoState, args) -> list:
                 return t
 
             t = t0
-            try:
-                state.metadata = fetch_video_metadata(url)
-            except Exception as e:
-                console.print(f"  [yellow]Metadata fetch failed: {e}[/yellow]")
-                state.metadata = None
+            cached_meta = try_load_metadata(metadata_path)
+            if cached_meta is not None:
+                state.metadata = cached_meta
+                console.print("  [dim]metadata: loaded from cache[/dim]")
+            else:
+                try:
+                    state.metadata = fetch_video_metadata(url)
+                    save_metadata(state.metadata, metadata_path)
+                except Exception as e:
+                    console.print(f"  [yellow]Metadata fetch failed: {e}[/yellow]")
+                    state.metadata = None
             t = _step("metadata", t)
 
             raw_audio = download_audio(url, output_dir)
@@ -144,8 +181,24 @@ def build_chatbot_tools(state: VideoState, args) -> list:
             transcript_path = output_dir / "transcript.txt"
             transcript_path.write_text(transcript_text, encoding="utf-8")
 
-            idx = build_index(diarized, embedding_model=args.embedding_model)
-            t = _step("index", t)
+            summary_path = output_dir / "summary.txt"
+
+            # build_index и summarize независимы — запускаем параллельно
+            console.print("  [dim]Running index + summarize in parallel...[/dim]")
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                f_index = pool.submit(build_index, diarized, args.embedding_model)
+                f_summary = (
+                    None if summary_path.exists()
+                    else pool.submit(summarize, transcript_text, args.llm_model)
+                )
+                idx = f_index.result()
+                if f_summary is not None:
+                    summary_path.write_text(f_summary.result(), encoding="utf-8")
+            t = _step("index+summarize", t)
+
+            # Сохраняем индекс на диск для следующих сессий
+            idx.save(index_dir)
+            t = _step("save cache", t)
 
             state.index = idx
             state.processed_url = url
@@ -179,8 +232,16 @@ def build_chatbot_tools(state: VideoState, args) -> list:
         Выделяет основные темы и ключевые тезисы."""
         if state.index is None:
             return "Видео ещё не загружено. Пришли ссылку на YouTube-видео."
+        video_id = extract_video_id(state.processed_url) if state.processed_url else None
+        summary_path = (base_dir / video_id / "summary.txt") if video_id else None
+        if summary_path is not None and summary_path.exists():
+            console.print("[dim]Summary loaded from cache[/dim]")
+            return summary_path.read_text(encoding="utf-8")
         transcript_text = format_transcript(state.index.segments)
-        return summarize(transcript_text, model=args.llm_model)
+        result = summarize(transcript_text, model=args.llm_model)
+        if summary_path is not None:
+            summary_path.write_text(result, encoding="utf-8")
+        return result
 
     @tool
     def get_transcript_metadata() -> str:
