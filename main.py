@@ -26,7 +26,7 @@ def main():
     )
     parser.add_argument(
         "--llm-model",
-        default="nvidia/nemotron-nano-9b-v2:free",
+        default="nvidia/nemotron-3-nano-30b-a3b:free",
         help="LLM model via OpenRouter — must support tool calling (default: nvidia/nemotron-nano-9b-v2:free)",
     )
     parser.add_argument(
@@ -52,6 +52,12 @@ def main():
         default=None,
         help="Parallel whisper worker processes (default: 1). "
              "Ignored when --auto-workers is set.",
+    )
+    parser.add_argument(
+        "--cookies-from-browser",
+        default=None,
+        metavar="BROWSER",
+        help="Browser to extract cookies from for yt-dlp (e.g. chrome, firefox, safari)",
     )
     parser.add_argument(
         "--auto-workers",

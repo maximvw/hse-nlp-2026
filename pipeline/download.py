@@ -37,11 +37,14 @@ def extract_video_id(url: str) -> str:
     return parts[-1] if parts else "video"
 
 
-def fetch_video_metadata(url: str) -> VideoMetadata:
+def fetch_video_metadata(url: str, cookies_from_browser: str | None = None) -> VideoMetadata:
     """Fetch video metadata from YouTube using yt-dlp (no download)."""
     console.print(f"[bold]Fetching metadata for:[/bold] {url}")
+    cmd = ["yt-dlp", "-j", "--no-playlist", url]
+    if cookies_from_browser:
+        cmd[1:1] = ["--cookies-from-browser", cookies_from_browser]
     result = subprocess.run(
-        ["yt-dlp", "-j", "--no-playlist", url],
+        cmd,
         check=True,
         capture_output=True,
         text=True,
@@ -112,7 +115,7 @@ def format_metadata(meta: VideoMetadata) -> str:
     return "\n".join(lines)
 
 
-def download_audio(url: str, output_dir: Path) -> Path:
+def download_audio(url: str, output_dir: Path, cookies_from_browser: str | None = None) -> Path:
     """Download audio from YouTube video using yt-dlp."""
     output_dir.mkdir(parents=True, exist_ok=True)
     raw_path = output_dir / "raw_audio.wav"
@@ -123,17 +126,17 @@ def download_audio(url: str, output_dir: Path) -> Path:
 
     output_template = str(output_dir / "raw_audio.%(ext)s")
     console.print(f"[bold]Downloading audio from:[/bold] {url}")
-    subprocess.run(
-        [
-            "yt-dlp",
-            "-x",
-            "--audio-format", "wav",
-            "-o", output_template,
-            "--no-playlist",
-            url,
-        ],
-        check=True,
-    )
+    cmd = [
+        "yt-dlp",
+        "-x",
+        "--audio-format", "wav",
+        "-o", output_template,
+        "--no-playlist",
+        url,
+    ]
+    if cookies_from_browser:
+        cmd[1:1] = ["--cookies-from-browser", cookies_from_browser]
+    subprocess.run(cmd, check=True)
 
     if not raw_path.exists():
         raise FileNotFoundError(f"Downloaded audio not found at {raw_path}")

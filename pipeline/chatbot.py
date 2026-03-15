@@ -145,14 +145,14 @@ def build_chatbot_tools(state: VideoState, args) -> list:
                 console.print("  [dim]metadata: loaded from cache[/dim]")
             else:
                 try:
-                    state.metadata = fetch_video_metadata(url)
+                    state.metadata = fetch_video_metadata(url, args.cookies_from_browser)
                     save_metadata(state.metadata, metadata_path)
                 except Exception as e:
                     console.print(f"  [yellow]Metadata fetch failed: {e}[/yellow]")
                     state.metadata = None
             t = _step("metadata", t)
 
-            raw_audio = download_audio(url, output_dir)
+            raw_audio = download_audio(url, output_dir, args.cookies_from_browser)
             t = _step("download", t)
 
             audio_path = preprocess_audio(raw_audio, output_dir)
