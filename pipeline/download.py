@@ -39,8 +39,14 @@ def extract_video_id(url: str) -> str:
 
 def fetch_video_metadata(url: str, cookies_from_browser: str | None = None) -> VideoMetadata:
     """Fetch video metadata from YouTube using yt-dlp (no download)."""
+    url = url.strip()
     console.print(f"[bold]Fetching metadata for:[/bold] {url}")
-    cmd = ["yt-dlp", "-j", "--no-playlist", url]
+    cmd = [
+        "yt-dlp", "-j", "--no-playlist", 
+        "--extractor-args", "youtube:player-client=web",
+        "--remote-components", "ejs:github",
+        url
+    ]
     if cookies_from_browser:
         cmd[1:1] = ["--cookies-from-browser", cookies_from_browser]
     result = subprocess.run(
@@ -117,6 +123,7 @@ def format_metadata(meta: VideoMetadata) -> str:
 
 def download_audio(url: str, output_dir: Path, cookies_from_browser: str | None = None) -> Path:
     """Download audio from YouTube video using yt-dlp."""
+    url = url.strip()
     output_dir.mkdir(parents=True, exist_ok=True)
     raw_path = output_dir / "raw_audio.wav"
 
@@ -132,6 +139,8 @@ def download_audio(url: str, output_dir: Path, cookies_from_browser: str | None 
         "--audio-format", "wav",
         "-o", output_template,
         "--no-playlist",
+        "--extractor-args", "youtube:player-client=web", 
+        "--remote-components", "ejs:github",            
         url,
     ]
     if cookies_from_browser:
