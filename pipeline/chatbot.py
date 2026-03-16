@@ -5,6 +5,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+import logging
 
 from langchain.agents import create_agent
 from langchain_core.messages import HumanMessage
@@ -23,6 +24,7 @@ from pipeline.summarize import summarize
 from pipeline.transcribe import transcribe
 from pipeline.vad import run_vad, group_segments
     
+logger = logging.getLogger(__name__)
 console = Console()
 
 SYSTEM_PROMPT = """\
@@ -55,6 +57,8 @@ class VideoState:
     index: TranscriptIndex | None = None
     processed_url: str | None = None
     metadata: VideoMetadata | None = None
+    status_callback: callable | None = None
+    is_stopped: bool = False
 
 
 def _get_llm(model: str) -> ChatOpenAI:
@@ -85,252 +89,127 @@ def _segments_to_text(segments) -> str:
         for seg in segments
     )
 
-
 def build_chatbot_tools(state: VideoState, args) -> list:
     base_dir = Path(args.output_dir)
 
     @tool
     def process_video(url: str) -> str:
-        """Скачать и обработать YouTube-видео: транскрипция + диаризация спикеров.
-        Вызывай сразу как только пользователь пришлёт ссылку на YouTube-видео.
+        """Скачать и обработать YouTube-видео."""
+        def notify(text: str):
+            # ЕСЛИ ПОЛЬЗОВАТЕЛЬ НАЖАЛ СТОП - КИДАЕМ ОШИБКУ
+            if state.is_stopped:
+                logger.warning("Пайплайн прерван пользователем")
+                raise InterruptedError("Выполнение остановлено пользователем.")
+            
+            logger.info(f"STATUS: {text}")
+            if state.status_callback: state.status_callback(text)
 
-        Args:
-            url: Ссылка на YouTube-видео.
-        """
-        # 1. In-session cache: видео уже обработано в этом сеансе
         if state.processed_url == url and state.index is not None:
-            meta_title = state.metadata.title if state.metadata else ""
-            console.print("[bold green]Видео уже в памяти[/bold green]")
-            return (
-                f"Видео уже обработано{f': {meta_title}' if meta_title else ''}. "
-                "Можешь задавать вопросы по видео."
-            )
+            return "Видео уже обработано."
 
         video_id = extract_video_id(url)
         output_dir = base_dir / video_id
         index_dir = output_dir / "index"
         metadata_path = output_dir / "metadata.json"
-        console.print(f"\n[bold]Processing:[/bold] {url}  [dim](output: {output_dir})[/dim]")
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # 2. Cross-session cache: пытаемся загрузить индекс с диска
+        notify("🔍 Проверка кэша...")
         cached_index = TranscriptIndex.try_load(index_dir, args.embedding_model)
         if cached_index is not None:
             state.index = cached_index
             state.processed_url = url
             state.metadata = try_load_metadata(metadata_path)
-            n_speakers = len({seg.speaker for seg in cached_index.segments})
-            duration = _fmt_time(cached_index.segments[-1].end if cached_index.segments else 0)
-            meta_title = state.metadata.title if state.metadata else ""
-            console.print("[bold green]Загружено из кэша[/bold green]")
-            return (
-                f"Видео загружено из кэша{f': {meta_title}' if meta_title else ''}.\n"
-                f"Длительность: {duration}, спикеров: {n_speakers}.\n"
-                f"Можешь задавать вопросы по видео."
-            )
+            notify("✅ Видео загружено из кэша")
+            return "Загружено из кэша."
 
-        # 3. Полная обработка
         try:
-            t0 = time.perf_counter()
+            notify("🌐 Получаю метаданные...")
+            state.metadata = fetch_video_metadata(url, args.cookies_from_browser)
+            save_metadata(state.metadata, metadata_path)
 
-            def _step(name: str, t_prev: float) -> float:
-                t = time.perf_counter()
-                console.print(f"  [dim]{name}: {t - t_prev:.1f}s[/dim]")
-                return t
-
-            t = t0
-            cached_meta = try_load_metadata(metadata_path)
-            if cached_meta is not None:
-                state.metadata = cached_meta
-                console.print("  [dim]metadata: loaded from cache[/dim]")
-            else:
-                try:
-                    state.metadata = fetch_video_metadata(url, args.cookies_from_browser)
-                    save_metadata(state.metadata, metadata_path)
-                except Exception as e:
-                    console.print(f"  [yellow]Metadata fetch failed: {e}[/yellow]")
-                    state.metadata = None
-            t = _step("metadata", t)
-
+            notify("📥 Скачиваю звук...")
             raw_audio = download_audio(url, output_dir, args.cookies_from_browser)
-            t = _step("download", t)
 
+            notify("🛠 Конвертирую аудио...")
             audio_path = preprocess_audio(raw_audio, output_dir)
-            t = _step("preprocess", t)
 
+            notify("✂️ VAD: Ищу речь...")
             vad_segments = run_vad(audio_path)
-            t = _step("VAD", t)
-
             chunks = group_segments(vad_segments)
 
-            # Run transcription and diarization concurrently — they only need audio_path
-            console.print("  [dim]Running transcribe + diarize in parallel...[/dim]")
+            notify("✍️ Транскрибация (может быть долго)...")
             with ThreadPoolExecutor(max_workers=2) as pool:
-                f_transcript = pool.submit(
-                    transcribe, audio_path, chunks,
-                    args.whisper_model, args.threads, args.language, args.workers,
-                )
-                f_diarize = pool.submit(diarize, audio_path, vad_segments)
-                transcript_segments = f_transcript.result()
-                speaker_turns = f_diarize.result()
-            t = _step("transcribe+diarize", t)
+                f_t = pool.submit(transcribe, audio_path, chunks, args.whisper_model, args.threads, args.language, args.workers)
+                f_d = pool.submit(diarize, audio_path, vad_segments)
+                ts_segs, spk_turns = f_t.result(), f_d.result()
 
-            diarized = align_transcript_with_speakers(transcript_segments, speaker_turns)
+            diarized = align_transcript_with_speakers(ts_segs, spk_turns)
             transcript_text = format_transcript(diarized)
+            (output_dir / "transcript.txt").write_text(transcript_text, encoding="utf-8")
 
-            transcript_path = output_dir / "transcript.txt"
-            transcript_path.write_text(transcript_text, encoding="utf-8")
-
-            summary_path = output_dir / "summary.txt"
-
-            # build_index и summarize независимы — запускаем параллельно
-            console.print("  [dim]Running index + summarize in parallel...[/dim]")
+            notify("🧠 Индексация и саммари...")
             with ThreadPoolExecutor(max_workers=2) as pool:
-                f_index = pool.submit(build_index, diarized, args.embedding_model)
-                f_summary = (
-                    None if summary_path.exists()
-                    else pool.submit(summarize, transcript_text, args.llm_model)
-                )
-                idx = f_index.result()
-                if f_summary is not None:
-                    summary_path.write_text(f_summary.result(), encoding="utf-8")
-            t = _step("index+summarize", t)
+                f_idx = pool.submit(build_index, diarized, args.embedding_model)
+                f_sum = pool.submit(summarize, transcript_text, args.llm_model)
+                idx = f_idx.result()
+                (output_dir / "summary.txt").write_text(f_sum.result(), encoding="utf-8")
 
-            # Сохраняем индекс на диск для следующих сессий
             idx.save(index_dir)
-            t = _step("save cache", t)
-
             state.index = idx
             state.processed_url = url
-
-            elapsed = time.perf_counter() - t0
-            n_speakers = len({seg.speaker for seg in diarized})
-            duration = _fmt_time(diarized[-1].end if diarized else 0)
-
-            console.print(f"[bold green]Готово за {elapsed:.1f}s[/bold green]")
-            return (
-                f"Видео обработано за {elapsed:.0f}с ({elapsed/60:.1f} мин).\n"
-                f"Длительность: {duration}, спикеров: {n_speakers}.\n"
-                f"Транскрипция сохранена: {transcript_path}.\n"
-                f"Теперь можешь задавать вопросы по видео."
-            )
+            notify("✅ Обработка завершена!")
+            return "Видео обработано."
+        except InterruptedError as e:
+            return str(e)
         except Exception as e:
-            return f"Ошибка при обработке видео: {e}"
+            logger.exception("Ошибка в пайплайне")
+            notify(f"❌ Ошибка: {str(e)}")
+            return f"Ошибка: {e}"
 
+    # ОСТАЛЬНЫЕ ИНСТРУМЕНТЫ (get_video_info, summarize_video и т.д.)
     @tool
     def get_video_info() -> str:
-        """Возвращает метаданные видео из YouTube: название, канал, дату публикации,
-        просмотры, теги, главы и описание.
-        Используй для вопросов: 'о чём это видео?', 'что за канал?', 'какие темы в видео?'"""
-        if state.metadata is None:
-            return "Видео ещё не загружено. Пришли ссылку на YouTube-видео."
-        return format_metadata(state.metadata)
+        """Инфо о видео."""
+        return format_metadata(state.metadata) if state.metadata else "Нет инфо."
 
     @tool
     def summarize_video() -> str:
-        """Сделать краткое содержание (саммари) обработанного видео.
-        Выделяет основные темы и ключевые тезисы."""
-        if state.index is None:
-            return "Видео ещё не загружено. Пришли ссылку на YouTube-видео."
-        video_id = extract_video_id(state.processed_url) if state.processed_url else None
-        summary_path = (base_dir / video_id / "summary.txt") if video_id else None
-        if summary_path is not None and summary_path.exists():
-            console.print("[dim]Summary loaded from cache[/dim]")
-            return summary_path.read_text(encoding="utf-8")
-        transcript_text = format_transcript(state.index.segments)
-        result = summarize(transcript_text, model=args.llm_model)
-        if summary_path is not None:
-            summary_path.write_text(result, encoding="utf-8")
-        return result
+        """Краткое содержание."""
+        if not state.processed_url: return "Загрузи видео."
+        p = base_dir / extract_video_id(state.processed_url) / "summary.txt"
+        return p.read_text(encoding="utf-8") if p.exists() else "Саммари нет."
 
     @tool
     def get_transcript_metadata() -> str:
-        """Возвращает общую информацию о видео: количество спикеров, длительность,
-        время речи каждого спикера и долю эфирного времени.
-        Используй для вопросов: 'сколько спикеров?', 'кто говорил дольше всех?'"""
-        if state.index is None:
-            return "Видео ещё не загружено. Пришли ссылку на YouTube-видео."
-        meta = state.index.get_metadata()
-        lines = [
-            f"Длительность видео: {meta['total_duration_fmt']}",
-            f"Количество спикеров: {meta['num_speakers']}",
-            "",
-            "Статистика по спикерам:",
-        ]
-        for speaker, info in meta["speakers"].items():
-            lines.append(
-                f"  {speaker}: {info['total_time_fmt']} "
-                f"({int(info['fraction'] * 100)}% эфирного времени)"
-            )
-        return "\n".join(lines)
+        """Статистика спикеров."""
+        if not state.index: return "Загрузи видео."
+        m = state.index.get_metadata()
+        res = [f"Спикеров: {m['num_speakers']}", f"Длительность: {m['total_duration_fmt']}"]
+        for s, i in m["speakers"].items():
+            res.append(f"{s}: {i['total_time_fmt']} ({int(i['fraction']*100)}%)")
+        return "\n".join(res)
 
     @tool
-    def get_segments_by_speaker(
-        speaker_id: str,
-        start_min: float | None = None,
-        end_min: float | None = None,
-    ) -> str:
-        """Возвращает реплики конкретного спикера из транскрипции.
-        Используй для: 'что сказал спикер №2?', 'что говорил SPEAKER_01 на 10-й минуте?'
-
-        Args:
-            speaker_id: ID спикера. Форматы: 'SPEAKER_00', 'SPEAKER_01', или просто '0', '1', '2'.
-            start_min: Начало временного диапазона в минутах (опционально).
-            end_min: Конец временного диапазона в минутах (опционально).
-        """
-        if state.index is None:
-            return "Видео ещё не загружено. Пришли ссылку на YouTube-видео."
-        sid = speaker_id.strip()
-        if sid.isdigit():
-            sid = f"SPEAKER_{int(sid):02d}"
-        segments = state.index.get_by_speaker(sid, start_min, end_min)
-        header = f"Реплики {sid}"
-        if start_min is not None or end_min is not None:
-            t_from = f"{start_min:.1f}" if start_min is not None else "начала"
-            t_to = f"{end_min:.1f}" if end_min is not None else "конца"
-            header += f" (с {t_from} по {t_to} мин)"
-        return f"{header}:\n{_segments_to_text(segments)}"
+    def get_segments_by_speaker(speaker_id: str, start_min: float = None, end_min: float = None) -> str:
+        """Реплики спикера."""
+        if not state.index: return "Загрузи видео."
+        sid = f"SPEAKER_{int(speaker_id):02d}" if speaker_id.isdigit() else speaker_id
+        return _segments_to_text(state.index.get_by_speaker(sid, start_min, end_min))
 
     @tool
     def get_segments_by_time(start_min: float, end_min: float) -> str:
-        """Возвращает все реплики в заданном временном диапазоне.
-        Используй для: 'что было на 5-10 минуте?', 'что происходило в начале видео?'
-
-        Args:
-            start_min: Начало диапазона в минутах.
-            end_min: Конец диапазона в минутах.
-        """
-        if state.index is None:
-            return "Видео ещё не загружено. Пришли ссылку на YouTube-видео."
-        segments = state.index.get_by_time(start_min, end_min)
-        return (
-            f"Транскрипция с {start_min:.1f} по {end_min:.1f} мин:\n"
-            + _segments_to_text(segments)
-        )
+        """Реплики по таймкодам."""
+        if not state.index: return "Загрузи видео."
+        return _segments_to_text(state.index.get_by_time(start_min, end_min))
 
     @tool
     def semantic_search(query: str) -> str:
-        """Семантический поиск по содержанию транскрипции.
-        Используй для тематических вопросов: 'что обсуждалось про X?', 'когда упоминалось Y?'
-
-        Args:
-            query: Поисковый запрос на русском языке.
-        """
-        if state.index is None:
-            return "Видео ещё не загружено. Пришли ссылку на YouTube-видео."
+        """Поиск по содержанию."""
+        if not state.index: return "Загрузи видео."
         docs = state.index.semantic_search(query, k=5)
-        return "\n\n---\n\n".join(doc.page_content for doc in docs)
+        return "\n\n".join(doc.page_content for doc in docs)
 
-    return [
-        process_video,
-        get_video_info,
-        summarize_video,
-        get_transcript_metadata,
-        get_segments_by_speaker,
-        get_segments_by_time,
-        semantic_search,
-    ]
-
+    return [process_video, get_video_info, summarize_video, get_transcript_metadata, get_segments_by_speaker, get_segments_by_time, semantic_search]
 
 def run_chatbot(args):
     """Запустить интерактивный чат-бот для анализа YouTube-видео."""

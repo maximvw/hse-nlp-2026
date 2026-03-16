@@ -19,4 +19,5 @@ dependencies = [
     "tomli-w==1.2.0",
     "torchcodec==0.10.0",
     "langchain==1.2.10",
+    "aiogram>=3.26.0",
 ]
