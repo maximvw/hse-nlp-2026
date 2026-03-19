@@ -10,6 +10,7 @@ from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKey
 from dotenv import load_dotenv
 
 from pipeline.chatbot import VideoState, build_chatbot_tools, _get_llm, SYSTEM_PROMPT
+from pipeline.formatting import md_to_tg_html
 from langchain.agents import create_agent
 from langchain_core.messages import HumanMessage
 
@@ -173,7 +174,11 @@ async def handle_link(message: Message):
         if ctx["state"].is_stopped: return
 
         ctx["history"] = result["messages"]
-        await message.answer(ctx["history"][-1].content, reply_markup=get_analysis_kb())
+        await message.answer(
+            md_to_tg_html(ctx["history"][-1].content),
+            parse_mode="HTML",
+            reply_markup=get_analysis_kb(),
+        )
         try:
             await bot.delete_message(message.chat.id, ctx["status_msg_id"])
         except: pass
@@ -204,7 +209,8 @@ async def handle_logic(message: Message, ctx: dict, text: str):
         await bot.edit_message_text(
             chat_id=message.chat.id,
             message_id=thinking_msg.message_id,
-            text=ctx["history"][-1].content
+            text=md_to_tg_html(ctx["history"][-1].content),
+            parse_mode="HTML",
         )
     except Exception as e:
         # ПРИ ОШИБКЕ В Q&A УДАЛЯЕМ "ДУМАЮ" И ШЛЕМ КАРТИНКУ
