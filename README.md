@@ -37,13 +37,15 @@ cp .env.example .env
 
 | Переменная | Описание | Обязательна |
 |---|---|---|
+| `TELEGRAM_TOKEN` | ТГ-токен | Да |
+|---|---|---|
 | `OPENROUTER_API_KEY` | API-ключ [OpenRouter](https://openrouter.ai/) | Да |
 
 
 ## Запуск
 
 ```bash
-uv run python main.py
+python tg_main.py --cookies-from-browser chrome
 ```
 
 После запуска бот ждёт ссылку на YouTube-видео в диалоге. Видео обрабатывается автоматически, затем можно задавать вопросы.
@@ -58,23 +60,3 @@ uv run python main.py
 Что обсуждалось про машинное обучение?
 Кто говорил дольше всех?
 ```
-
-### Параметры CLI
-
-| Параметр | По умолчанию | Описание |
-|---|---|---|
-| `-o`, `--output-dir` | `output` | Директория для промежуточных файлов |
-| `--whisper-model` | `large-v3-turbo-q5_0` | Модель whisper.cpp |
-| `--llm-model` | `nvidia/nemotron-nano-9b-v2:free` | Модель LLM через OpenRouter (нужен tool calling) |
-| `--embedding-model` | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | Модель эмбеддингов |
-| `--language` | `ru` | Язык ASR |
-| `--threads` | `4` | Потоков на один whisper-процесс |
-| `--workers` | `1` | Параллельных whisper-процессов |
-| `--auto-workers` | — | Автоматически: `workers = cpu_count // 4`, `threads = 4` |
-
-## Результаты
-
-После обработки в `--output-dir/{video_id}/` сохраняются:
-- `transcript.txt` — транскрипт с таймкодами и именами спикеров
-- `metadata.json` — метаданные YouTube
-- `index/segments.json` + `index/faiss/` — кэш индекса (повторный запуск загрузит без обработки)
