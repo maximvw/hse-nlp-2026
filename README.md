@@ -44,7 +44,7 @@ cp .env.example .env
 ## Запуск
 
 ```bash
-python tg_main.py --cookies-from-browser chrome
+uv run tg_main.py --cookies-from-browser chrome
 ```
 
 После запуска бот ждёт ссылку на YouTube-видео в диалоге. Видео обрабатывается автоматически, затем можно задавать вопросы.
