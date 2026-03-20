@@ -38,7 +38,6 @@ cp .env.example .env
 | Переменная | Описание | Обязательна |
 |---|---|---|
 | `TELEGRAM_TOKEN` | ТГ-токен | Да |
-|---|---|---|
 | `OPENROUTER_API_KEY` | API-ключ [OpenRouter](https://openrouter.ai/) | Да |
 
 
